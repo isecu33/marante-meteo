@@ -1,0 +1,6 @@
+# TLS delante de nginx (producción en Oracle). Caddy pide y renueva solo el
+# certificado de Let's Encrypt para el dominio de DuckDNS (puertos 80 y 443).
+{$DOMINIO} {
+	encode zstd gzip
+	reverse_proxy nginx:8080
+}

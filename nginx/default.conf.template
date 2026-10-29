@@ -1,0 +1,63 @@
+# nginx delante de Open-Meteo self-hosted (Marante, issue #129).
+# Plantilla: la imagen oficial de nginx sustituye ${MARANTE_CLAVE} al arrancar
+# (solo variables de entorno definidas; $uri, $args... quedan como estan).
+
+# --- Cache en disco -------------------------------------------------------
+# keys_zone: 10 MB de RAM para indices (~80.000 entradas).
+# max_size: tope de disco. inactive: borra entradas que nadie pide en 6 h.
+proxy_cache_path /var/cache/nginx/meteo levels=1:2 keys_zone=meteo:10m
+                 max_size=1g inactive=6h use_temp_path=off;
+
+# --- Limite de peticiones por IP -----------------------------------------
+# 5 peticiones/s sostenidas por IP; la rafaga se permite abajo con burst.
+limit_req_zone $binary_remote_addr zone=porip:10m rate=5r/s;
+limit_req_status 429;
+
+# --- Clave de la app -----------------------------------------------------
+# La app envia la cabecera X-Marante-Clave. No es secreta de verdad (va en
+# el APK), pero frena el uso casual del servidor por terceros.
+map $http_x_marante_clave $clave_ok {
+    default            0;
+    "${MARANTE_CLAVE}" 1;
+}
+
+server {
+    listen 8080;
+
+    # Comprobacion de vida (para monitorizacion), sin clave ni cache.
+    location = /salud {
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # Solo se exponen los dos endpoints que usa la app.
+    location ~ ^/v1/(forecast|marine)$ {
+        if ($clave_ok = 0) { return 403; }
+
+        limit_req zone=porip burst=20 nodelay;
+
+        proxy_pass http://api:8080;
+
+        # Cache: la clave es la URL completa (ruta + parametros). La app debe
+        # redondear lat/lon (2 decimales) para que spots cercanos compartan.
+        proxy_cache meteo;
+        proxy_cache_key "$uri?$args";
+        proxy_ignore_headers Cache-Control Expires Set-Cookie;
+        proxy_cache_valid 200 30m;   # los modelos cambian cada pocas horas
+        proxy_cache_valid any 1m;    # errores: poco tiempo
+
+        # Resiliencia: si Open-Meteo falla o esta ocupado, servir lo ultimo bueno.
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+        proxy_cache_background_update on;
+
+        # 100 peticiones iguales a la vez -> una sola llega a Open-Meteo.
+        proxy_cache_lock on;
+        proxy_cache_lock_timeout 10s;
+
+        # HIT / MISS / STALE / UPDATING: util para comprobar que cachea.
+        add_header X-Cache-Status $upstream_cache_status always;
+    }
+
+    # Todo lo demas, cerrado.
+    location / { return 404; }
+}

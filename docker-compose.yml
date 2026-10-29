@@ -1,0 +1,60 @@
+# Prueba de Open-Meteo self-hosted para Marante/PescaPro (issue #130)
+# - "sync": copia del bucket abierto de AWS (CC BY 4.0) solo los modelos y
+#   variables que usa la app, recortados a la peninsula iberica + Baleares.
+# - "api": sirve /v1/forecast y /v1/marine en http://127.0.0.1:8080 leyendo
+#   SOLO los datos locales (sin REMOTE_DATA_DIRECTORY).
+# Uso: ver README.md.
+
+volumes:
+  open-meteo-data:
+  nginx-cache:
+
+x-imagen: &imagen
+  image: ghcr.io/open-meteo/open-meteo
+  volumes:
+    - open-meteo-data:/app/data
+
+services:
+  sync:
+    <<: *imagen
+    container_name: marante-meteo-sync
+    # Nombres de variable ALMACENADOS (no los derivados de la API):
+    #  - viento: wind_u/v_component_10m  -> wind_speed_10m / wind_direction_10m
+    #  - corrientes: ocean_u/v_current  -> ocean_current_velocity / _direction
+    #  - surface_pressure se deriva de pressure_msl + temperature_2m + elevacion
+    # Las variables que no existen en un modelo se ignoran (SyncCommand filtra
+    # por los directorios remotos). "static" se anade siempre.
+    command:
+      - sync
+      - dwd_icon,dwd_icon_eu,ncep_gfs013,meteofrance_wave,dwd_ewam,meteofrance_currents,meteofrance_sea_surface_temperature
+      - temperature_2m,precipitation,weather_code,cloud_cover,visibility,wind_u_component_10m,wind_v_component_10m,wind_gusts_10m,pressure_msl,uv_index,wave_height,wave_direction,wave_period,swell_wave_height,swell_wave_period,sea_surface_temperature,ocean_u_current,ocean_v_current,sea_level_height_msl
+      - --past-days
+      - "3"
+      - --bounding-box
+      - "35.5,-10.5,44.5,4.5"
+      - --repeat-interval
+      - "30"
+    restart: unless-stopped
+
+  api:
+    <<: *imagen
+    container_name: marante-meteo-api
+    ports:
+      - "127.0.0.1:8080:8080"   # acceso directo, solo para comparar en la prueba
+    restart: unless-stopped
+
+  # nginx delante de la API: cache en disco, limite por IP y clave de la app.
+  # Es la puerta que vera la app: http://127.0.0.1:8081
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: marante-meteo-nginx
+    depends_on:
+      - api
+    environment:
+      MARANTE_CLAVE: ${MARANTE_CLAVE:-prueba-local}
+    volumes:
+      - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - nginx-cache:/var/cache/nginx/meteo
+    ports:
+      - "127.0.0.1:8081:8080"
+    restart: unless-stopped
